@@ -1,10 +1,54 @@
-# Local EIP-4337 Development Guide
+# (DRAFT) Local ERC-4337 Development Guide
 
-This comprehensive guide teaches you ERC-4337 Account Abstraction from the ground up by building the complete infrastructure locally. You'll gain deep understanding by implementing every component yourself, from the EntryPoint contract to bundlers and smart contract wallets. We'll use the eth-infinitism libraries, which are maintained by the core ERC-4337 team and provide the most reliable implementation of the standard
+This guide teaches you ERC-4337 Account Abstraction from the ground up by building the complete infrastructure locally. You'll gain a deep understanding by implementing every component yourself, from the EntryPoint contract to bundlers and smart contract wallets. We'll use the **eth-infinitism** libraries, which are maintained by the core ERC-4337 team and provide the most reliable implementation of the standard.
 
-## What is EIP-4337?
+> [!NOTE]
+> If you are unfamiliar with concepts like **UserOperation**, **EntryPoint**, **alt-mempool**, **bundlers**, and **paymasters**, start with an introductory guide. This tutorial is intended for those who already understand the general idea of EIP-4337 but want to see how it works in practice.
 
-EIP-4337 introduces Account Abstraction to Ethereum, allowing smart contracts to act as user accounts. This enables features like gasless transactions, social recovery, and more flexible authentication methods without requiring changes to the Ethereum protocol.
+---
+
+### Why account abstraction matters
+
+Ethereum accounts are currently split into two types: **Externally Owned Accounts (EOAs)** and **contract accounts**. EOAs can initiate transactions but are limited to a single ECDSA key for authentication. Contract accounts can execute arbitrary logic but cannot initiate transactions themselves.
+
+**EIP-4337** introduces account abstraction without changing Ethereum's base protocol. Instead of regular transactions, users create `UserOperation` objects and broadcast them to a permissionless **alt-mempool**. **Bundlers** collect these UserOperations, validate them, and submit them in batches to a singleton **EntryPoint** contract on-chain. The EntryPoint contract:
+
+* Verifies signatures
+* Executes calls on behalf of smart accounts
+* Deducts gas fees or consults paymasters when gas is sponsored
+
+This approach enables smart contract wallets to function as primary accounts without relying on EOAs. It unlocks:
+
+* Custom signature schemes (e.g., passkeys)
+* Gas sponsorship (meta-transactions)
+* Batched transactions
+* Account recovery options
+
+---
+
+## Core Components
+
+The ERC-4337 standard defines both **on-chain contracts** and **off-chain infrastructure**.
+
+### On-Chain Architecture
+
+| Component              | Role                                                                                                                                                                                                                                                                        |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| EntryPoint             | Singleton smart contract that verifies, executes, and charges UserOperations. Bundlers call its `handleOps()` function with a batch of UserOperations. It stores deposits and stakes, coordinates calls to wallets and paymasters, and returns unused gas fees to bundlers. |
+| Smart Accounts         | Smart contract wallets implementing the `IAccount.validateUserOp()` hook to check signatures and nonces, and an `execute()` function to perform user-specified calls. The example **SimpleAccount** has a single owner and supports deposits, withdrawals, and calls.       |
+| Paymasters             | Contracts that sponsor gas for a UserOperation. During validation, the EntryPoint calls `validatePaymasterUserOp()`; if it returns a context, `postOp()` is called after execution. Paymasters must stake and maintain a deposit to prevent griefing.                       |
+| Aggregators (optional) | Contracts that verify aggregated signatures. They allow multiple UserOperations to share a single signature, reducing calldata costs.                                                                                                                                       |
+
+### Off-Chain Architecture
+
+| Component                   | Role                                                                                                                                                                                                                                                                  |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Alt-mempool                 | A separate mempool where clients send UserOperations. This mempool is independent of Ethereum's transaction pool and can implement censorship-resistant gossip protocols.                                                                                             |
+| Bundlers                    | Off-chain relayers that monitor the alt-mempool, simulate UserOperations with `simulateValidation()` on the EntryPoint, group valid operations, and submit them on-chain via `handleOps()`. They pay gas upfront and are reimbursed from user deposits or paymasters. |
+| UserOperation Creators      | Wallet libraries and SDKs that build UserOperations, estimate gas, sign them, and broadcast them to bundlers. The `@account-abstraction/sdk` provides a high-level API for constructing and signing operations.                                                       |
+| Gas Estimators & Simulators | Bundlers also expose RPC methods like `eth_estimateUserOperationGas` and `simulateValidation` to help wallets accurately estimate gas limits for verification and execution.                                                                                          |
+
+---
 
 ## Project Setup
 
@@ -13,25 +57,26 @@ EIP-4337 introduces Account Abstraction to Ethereum, allowing smart contracts to
 Create a new directory and initialize a Foundry project:
 
 ```sh
-mkdir eip4337-local-setup
-cd eip4337-local-setup
+mkdir eip4337-local
+cd eip4337-local
 forge init
 ```
 
 ### 2. Install Required Dependencies
 
-Install the core Account Abstraction contracts and P256 verifier library:
+Install the core Account Abstraction contracts. The `account-abstraction` package includes all essential contracts, including EntryPoint:
 
 ```sh
 forge install eth-infinitism/account-abstraction
+```
+
+To implement passkey (WebAuthn) signatures, you also need a contract for **secp256r1** signature verification:
+
+```sh
 forge install daimo-eth/p256-verifier
 ```
 
-The `account-abstraction` package contains all the essential contracts including EntryPoint, while `p256-verifier` enables support for secp256r1 signatures (commonly used in WebAuthn).
-
-## Setting Up the Local Blockchain
-
-### Start Anvil (Local Ethereum Node)
+### 3. Start Anvil (Local Ethereum Node)
 
 Launch a local blockchain using Anvil:
 
@@ -39,50 +84,61 @@ Launch a local blockchain using Anvil:
 anvil
 ```
 
-<!-- TODO: this is only true for this repo, but not for the article -->
 For faster development, you can start Anvil with a pre-deployed EntryPoint contract:
 
 ```sh
 anvil --load-state anvil/state.json
 ```
 
-This loads a saved state with contracts already deployed, saving you deployment time during development.
+This loads a saved state with contracts already deployed, saving deployment time during development.
 
-## Deploying the EntryPoint Contract
+---
 
-The EntryPoint is the core non-upgradable contract (version 0.8) that handles all UserOperations. It has a deterministic address across all networks: `0x4337084d9e255ff0702461cf8895ce9e3b5ff108`.
+## 1. EntryPoint
 
-### Prerequisites for Deployment
+The EntryPoint is the central coordinator for all Account Abstraction operations. Think of it as the "transaction processor" that replaces the traditional transaction pool for smart accounts. Instead of EOAs sending transactions directly, bundlers send batches of UserOperations to the EntryPoint's `handleOps()` function.
 
-The EntryPoint can be deployed using CREATE2 if the deterministic deployer contract exists at `0x4e59b44847b379578588920ca78fbf26c0b4956c`. This deployer is available on Anvil by default.
+The EntryPoint version 0.8 is the core non-upgradable contract that handles all UserOperations. It has a deterministic address across all networks: `0x4337084d9e255ff0702461cf8895ce9e3b5ff108`.
 
-### Deployment Steps
+The EntryPoint can be deployed to this canonical address on any network using the CREATE2 opcode through a deterministic deployment factory. This factory contract exists at `0x4e59b44847b379578588920ca78fbf26c0b4956c` and is available on most networks, including Anvil by default.
 
-The most reliable method is using the official eth-infinitism repository:
+The most reliable method is to use the official **eth-infinitism** repository:
 
-1. **Clone the Account Abstraction Repository**
-   ```sh
-   git clone https://github.com/eth-infinitism/account-abstraction.git
-   cd account-abstraction
-   ```
+1. Clone the [Account Abstraction repository](https://github.com/eth-infinitism/account-abstraction) and install its dependencies with `yarn` or `npm`.
+2. Deploy the EntryPoint contract using the provided scripts:
 
-2. **Install Dependencies**
-   ```sh
-   yarn install
-   ```
-
-3. **Deploy the EntryPoint**
-   ```sh
-   yarn hardhat deploy --network dev
-   ```
-
-After successful deployment, you should see output similar to:
-
-```
-deploying "EntryPoint" (tx: 0x456b31559abf2560e9968663e4a73f0db03d1a0ff73019f71b61dcc6846f5f0c)...
-: deployed at 0x0000000071727De22E5E9d8BAf0edAc6f37da032 with 5034766 gas
-==entrypoint addr= 0x0000000071727De22E5E9d8BAf0edAc6f37da032
+```sh
+yarn hardhat deploy --network dev
 ```
 
-Verify that the EntryPoint address matches `0x4e59b44847b379578588920ca78fbf26c0b4956c`. This deterministic address ensures compatibility with Account Abstraction tooling and bundlers.
+After a successful deployment, you should see output similar to:
 
+```
+deploying "EntryPoint" (tx: 0x456b31559abf2560e9968663e4a73f0db03d1a0ff73019f71b61dcc6846f5f0c)...: deployed at 0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108 with 5034766 gas
+==entrypoint addr= 0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108
+```
+
+Verify that the EntryPoint address matches `0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108`. This deterministic address ensures compatibility with Account Abstraction tooling and bundlers.
+
+## 2. SmartAccount
+
+> [!NOTE]
+> Disclaimer: This guide is for educational purposes only. Deploying smart contracts involves real risk; always audit contracts, test on a local network and seek professional advice before handling real funds.
+
+The `eth-infinitism/account-abstraction` library we installed earlier includes a minimal smart account, [BaseAccount.sol](https://github.com/eth-infinitism/account-abstraction/blob/v0.8.0/contracts/core/BaseAccount.sol). We use this contract along with `p256-verifier` contracts to create our custom smart wallet enable to verify pass keys.
+
+<!-- TODO: intro -->
+<!-- TODO: basic smart account -->
+<!-- TODO: extend it with pass keys. Deploy P256-verifier contract and use it in validation logic -->
+<!-- TODO: generate Pass Key with my apple and deploy the Smart Account to our Anvil node -->
+
+## 3. Bundler and Alt-mempool
+
+<!-- TODO: Historically it was per-bundler mempool -->
+<!-- TODO: Now it is shared mempool -->
+<!-- TODO: Using some real bundler such as eth-infinitism or any other -->
+
+## 4. Sending UserOp
+
+<!-- TODO: Fund my Wallet (or EntryPoint) so it can pay fees -->
+<!-- TODO: Using some real JS library/SDK to send a user op signed with pass keys to Bundler -->

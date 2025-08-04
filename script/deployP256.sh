@@ -1,0 +1,1 @@
+forge script lib/p256-verifier/script/Deploy.s.sol:DeployScript --rpc-url http://localhost:8545 --private-key 0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356 --via-ir --optimizer-runs 999999 --broadcast
