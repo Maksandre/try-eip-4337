@@ -13,16 +13,16 @@ Ethereum accounts are currently split into two types: **Externally Owned Account
 
 **EIP-4337** introduces account abstraction without changing Ethereum's base protocol. Instead of regular transactions, users create `UserOperation` objects and broadcast them to a permissionless **alt-mempool**. **Bundlers** collect these UserOperations, validate them, and submit them in batches to a singleton **EntryPoint** contract on-chain. The EntryPoint contract:
 
-* Verifies signatures
-* Executes calls on behalf of smart accounts
-* Deducts gas fees or consults paymasters when gas is sponsored
+- Verifies signatures
+- Executes calls on behalf of smart accounts
+- Deducts gas fees or consults paymasters when gas is sponsored
 
 This approach enables smart contract wallets to function as primary accounts without relying on EOAs. It unlocks:
 
-* Custom signature schemes (e.g., passkeys)
-* Gas sponsorship (meta-transactions)
-* Batched transactions
-* Account recovery options
+- Custom signature schemes (e.g., passkeys)
+- Gas sponsorship (meta-transactions)
+- Batched transactions
+- Account recovery options
 
 ---
 
@@ -120,19 +120,89 @@ deploying "EntryPoint" (tx: 0x456b31559abf2560e9968663e4a73f0db03d1a0ff73019f71b
 
 Verify that the EntryPoint address matches `0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108`. This deterministic address ensures compatibility with Account Abstraction tooling and bundlers.
 
-## 2. SmartAccount
+## 2. Smart Wallet with PassKeys
 
 > [!NOTE]
 > Disclaimer: This guide is for educational purposes only. Deploying smart contracts involves real risk; always audit contracts, test on a local network and seek professional advice before handling real funds.
 
-The `eth-infinitism/account-abstraction` library we installed earlier includes a minimal smart account, [BaseAccount.sol](https://github.com/eth-infinitism/account-abstraction/blob/v0.8.0/contracts/core/BaseAccount.sol). We use this contract along with `p256-verifier` contracts to create our custom smart wallet enable to verify pass keys.
+If you've played with ERC-4337 before, you know the usual setup: a smart wallet that inherits from `BaseAccount`, some `validateUserOp` magic, and an ECDSA signature check to see if the operation is legit.
 
-<!-- TODO: intro -->
-<!-- TODO: basic smart account -->
-<!-- TODO: extend it with pass keys. Deploy P256-verifier contract and use it in validation logic -->
+Now imagine swapping that MetaMask-style key for something your phone already has — a PassKey. FaceID, TouchID, your laptop's fingerprint sensor. No seed phrase, no password reset link, no lost private keys panic.
+
+That's exactly what we're doing here: replacing the ECDSA check with a WebAuthn P-256 signature verification.
+
+### Step 1 — Start with BaseAccount
+
+I didn't want to reinvent ERC-4337's boilerplate. The Eth-Infinitism BaseAccount already implements the ERC-4337 plumbing: nonce handling, `validateUserOp`, entry point checks.
+
+That validateUserOp method is where the magic happens. Normally, you'd grab userOpHash and run ecrecover to see if the ECDSA signature matches your stored address. We're going to tear that part out and drop in a P-256 verifier.
+
+### Step 2 — Storing a PassKey on-chain
+
+When a user registers a PassKey in your dApp, their browser gives you a public key on the P-256 curve — two numbers, `x` and `y`. We store those on-chain in our smart wallet. That's the user's identity now.
+
+```solidity
+bytes32 public pubKeyX;
+bytes32 public pubKeyY;
+
+function initialize(bytes32 _x, bytes32 _y) external {
+    pubKeyX = _x;
+    pubKeyY = _y;
+}
+```
+
+That's it. No addresses, no seed phrases, just curve coordinates. Lose those keys and you lose the wallet, so think about recovery later.
+
+### Step 3 — Verifying a PassKey signature
+
+<!-- TODO fact check -->
+
+The PassKey signing flow is very different from Ethereum signatures. When the browser signs something, you don't just get (r, s). You also get a bundle of authenticatorData and clientDataJSON that need to be hashed together exactly like WebAuthn specifies.
+
+This is where Daimo's WebAuthn.sol saves you. It knows how to take those fields, reconstruct the signed message, and check it against (pubKeyX, pubKeyY).
+
+So inside our `validateUserOp`, we decode the signature payload and hand it to the verifier:
+
+```solidity
+function validateUserOp(
+    PackedUserOperation calldata userOp,
+    bytes32 userOpHash,
+    uint256 /* missingAccountFunds */
+) public override returns (uint256) {
+    WebAuthn.Signature memory sig = abi.decode(userOp.signature, (WebAuthn.Signature));
+    bool valid = WebAuthn.verifySignature(pubKeyX, pubKeyY, sig, userOpHash);
+    require(valid, "Invalid PassKey signature");
+    return 0;
+}
+```
+
+If that check passes, the EntryPoint is happy and the operation goes through.
+
+### Step 4 — Signing from the browser
+
+On the frontend, it feels almost too simple. You call navigator.credentials.create() to make a PassKey during wallet creation. That gives you `x` and `y` for storage in the contract.
+
+Later, when sending a transaction, you call `navigator.credentials.get()` to sign your `userOpHash`. The browser pops up FaceID or your fingerprint prompt, the user approves, and you get back the signature bundle to stick into `userOp.signature`.
+
+No seed phrase ceremony, no wallet popup. It's just the web doing what the web is good at.
+
+### Warnings
+
+Here's the honest part: P-256 on EVM is expensive. Right now, each signature verification costs hundreds of thousands of gas. On L1, you're going to feel that.
+
+Until EIP-7212 (native P-256 precompile) is widely deployed, this is best suited for L2s or appchains where gas isn't painful.
+
+And then there's recovery. PassKeys are tied to devices. Lose your phone and you lose the key. You need some way to rotate keys or add backup credentials. This isn't a "just deploy it" setup unless you're okay with that risk (you're not).
+
 <!-- TODO: generate Pass Key with my apple and deploy the Smart Account to our Anvil node -->
 
 ## 3. Bundler and Alt-mempool
+
+You prepared a `UserOperation` (your WebAuthn‑signed request bundled in JSON). Now what? You don't send it to Ethereum directly, because nodes will never pass it through – UserOp is not a valid transaction itself. So you need to send it to someone who create a valid transaction. You send it to a bundler.
+
+### How bundlers work
+
+
 
 <!-- TODO: Historically it was per-bundler mempool -->
 <!-- TODO: Now it is shared mempool -->
