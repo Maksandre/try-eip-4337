@@ -137,6 +137,24 @@ I didn't want to reinvent ERC-4337's boilerplate. The Eth-Infinitism BaseAccount
 
 That validateUserOp method is where the magic happens. Normally, you'd grab userOpHash and run ecrecover to see if the ECDSA signature matches your stored address. We're going to tear that part out and drop in a P-256 verifier.
 
+Because the latest verion of account abstraction library requires solidity 0.8.28 or higher and the P256-Verifier requires exact version of 0.8.21 we need to pre-deploy its contracts beforehand.
+
+If you started anvil using prepared state, than `P256-Verifier` is already deployed to a determenistic address `0xc2b78104907F722DABAc4C69f826a522B2754De4`. You can ensure by quering the code of this address:
+
+```sh
+cast code 0xc2b78104907F722DABAc4C69f826a522B2754De4
+```
+
+If the code is `0x0` you need to deploy it yourself. The official repository provides a deployment script. However, even though it supposed to create determenistic address, most likely it wount for you, because of metadata appended <!-- TODO find the proof in the foundry doc or give a link to the issue -->. So instead the easiest way would be to replay the [existing deployment](https://basescan.org/tx/0x9aea3316c197992740ef943ae3269901fae3c58e4654acc5cd6c2e7529eb8990) transaction against your Anvil node. You can try it yourself, but if you get stuck just execute the deployment script I prepare.
+
+<!-- TODO the link to the deployment script -->
+
+<!-- TODO: link -->
+
+I will also deploy WebAuthn.sol to verify PassKeys.
+
+<!-- TODO: code from WebAuthVerifier.sol, IWebAuthVerifier.sol, DeployVerifier.s.sol here -->
+
 ### Step 2 — Storing a PassKey on-chain
 
 When a user registers a PassKey in your dApp, their browser gives you a public key on the P-256 curve — two numbers, `x` and `y`. We store those on-chain in our smart wallet. That's the user's identity now.
@@ -201,8 +219,6 @@ And then there's recovery. PassKeys are tied to devices. Lose your phone and you
 You prepared a `UserOperation` (your WebAuthn‑signed request bundled in JSON). Now what? You don't send it to Ethereum directly, because nodes will never pass it through – UserOp is not a valid transaction itself. So you need to send it to someone who create a valid transaction. You send it to a bundler.
 
 ### How bundlers work
-
-
 
 <!-- TODO: Historically it was per-bundler mempool -->
 <!-- TODO: Now it is shared mempool -->
