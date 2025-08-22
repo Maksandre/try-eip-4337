@@ -1,3 +1,10 @@
+The list of contracts:
+
+- EntryPoint: `0x4337084d9e255ff0702461cf8895ce9e3b5ff108`
+- P256-Verifier: `0xc2b78104907F722DABAc4C69f826a522B2754De4`
+- WebAuthn.sol: `0xA15BB66138824a1c7167f5E85b957d04Dd34E468`
+- PassKeyAccount: ``
+
 # (DRAFT) Local ERC-4337 Development Guide
 
 This guide teaches you ERC-4337 Account Abstraction from the ground up by building the complete infrastructure locally. You'll gain a deep understanding by implementing every component yourself, from the EntryPoint contract to bundlers and smart contract wallets. We'll use the **eth-infinitism** libraries, which are maintained by the core ERC-4337 team and provide the most reliable implementation of the standard.
