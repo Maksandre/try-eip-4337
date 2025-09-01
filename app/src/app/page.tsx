@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   startRegistration,
   startAuthentication,
@@ -25,6 +25,35 @@ export default function Home() {
   );
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [ethBalance, setEthBalance] = useState<string | null>(null);
+  const [entryPointDeposit, setEntryPointDeposit] = useState<string | null>(
+    null
+  );
+  const [sendTo, setSendTo] = useState<string>("");
+  const [sendValue, setSendValue] = useState<string>("");
+
+  useEffect(() => {
+    async function fetchBalances(addr: string) {
+      try {
+        const res = await fetch(`/api/balances?address=${addr}`);
+        const json = await res.json();
+        if (res.ok) {
+          setEthBalance(json.ethBalanceEth);
+          setEntryPointDeposit(json.entryPointDepositEth);
+        } else {
+          setMessage(json.error || "Failed to fetch balances");
+        }
+      } catch (e: any) {
+        setMessage(e?.message || String(e));
+      }
+    }
+    if (accountAddress) {
+      fetchBalances(accountAddress);
+    } else {
+      setEthBalance(null);
+      setEntryPointDeposit(null);
+    }
+  }, [accountAddress]);
 
   async function handleRegister() {
     setLoading(true);
@@ -145,6 +174,117 @@ export default function Home() {
         <div className={styles.section}>
           <h2 className={styles.subheading}>SmartAccount Address</h2>
           <code className={styles.code}>{accountAddress}</code>
+          <div style={{ marginTop: "0.75rem" }}>
+            <div>
+              ETH Balance: <strong>{ethBalance ?? "-"}</strong>
+            </div>
+            <div>
+              EntryPoint Deposit: <strong>{entryPointDeposit ?? "-"}</strong>
+            </div>
+            <button
+              className={styles.button}
+              style={{ marginTop: "0.5rem" }}
+              onClick={async () => {
+                if (!accountAddress) return;
+                setLoading(true);
+                try {
+                  const res = await fetch(
+                    `/api/balances?address=${accountAddress}`
+                  );
+                  const json = await res.json();
+                  if (res.ok) {
+                    setEthBalance(json.ethBalanceEth);
+                    setEntryPointDeposit(json.entryPointDepositEth);
+                  } else {
+                    setMessage(json.error || "Failed to refresh balances");
+                  }
+                } catch (e: any) {
+                  setMessage(e?.message || String(e));
+                } finally {
+                  setLoading(false);
+                }
+              }}
+              disabled={loading}
+            >
+              Refresh Balances
+            </button>
+          </div>
+        </div>
+      )}
+
+      {accountAddress && (
+        <div className={styles.section}>
+          <h2 className={styles.subheading}>Send ETH (Passkey-signed)</h2>
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}
+          >
+            <input
+              placeholder="Recipient 0x..."
+              value={sendTo}
+              onChange={(e) => setSendTo(e.target.value)}
+              style={{ padding: "0.5rem", borderRadius: 6 }}
+            />
+            <input
+              placeholder="Amount in ETH (e.g. 0.01)"
+              value={sendValue}
+              onChange={(e) => setSendValue(e.target.value)}
+              style={{ padding: "0.5rem", borderRadius: 6 }}
+            />
+            <button
+              className={styles.button}
+              disabled={loading || !sendTo || !sendValue}
+              onClick={async () => {
+                if (!accountAddress) return;
+                setLoading(true);
+                setMessage(null);
+                try {
+                  const prep = await fetch(
+                    `/api/generate-send-auth-options?sender=${accountAddress}&to=${sendTo}&valueEth=${sendValue}`
+                  );
+                  const { options, userOp, error } = await prep.json();
+                  if (!prep.ok) {
+                    setMessage(
+                      error ||
+                        options?.error ||
+                        "Failed to prepare user operation"
+                    );
+                    setLoading(false);
+                    return;
+                  }
+
+                  const assertion = await startAuthentication(options);
+
+                  const submit = await fetch("/api/send-eth", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ userOp, assertion }),
+                  });
+                  const submitJson = await submit.json();
+                  if (submit.ok) {
+                    setMessage(`Submitted. Tx: ${submitJson.txHash}`);
+                    setTimeout(async () => {
+                      const res = await fetch(
+                        `/api/balances?address=${accountAddress}`
+                      );
+                      const json = await res.json();
+                      if (res.ok) {
+                        setEthBalance(json.ethBalanceEth);
+                        setEntryPointDeposit(json.entryPointDepositEth);
+                      }
+                    }, 1500);
+                  } else {
+                    setMessage(submitJson.error || "Submission failed");
+                  }
+                } catch (e: any) {
+                  setMessage(e?.message || String(e));
+                } finally {
+                  setLoading(false);
+                }
+              }}
+            >
+              Send ETH
+            </button>
+          </div>
         </div>
       )}
 
