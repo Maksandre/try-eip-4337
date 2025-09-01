@@ -15,8 +15,8 @@ contract PasskeyAccount is BaseAccount {
 
     // tweak per-chain
     // TODO: remove for simplicity?
-    bool public usePrecompiled = false; // true on chains with EIP-7212 at 0x0100
-    bool public requireUserVerification = true; // require UV bit
+    bool public usePrecompiled = false;
+    bool public requireUserVerification = true;
 
     constructor(uint256 _x, uint256 _y, address _verifierAddress) {
         pubKeyX = _x;
